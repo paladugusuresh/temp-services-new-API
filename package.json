@@ -1,0 +1,23 @@
+{
+  "name": "temp-services-api",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "refresh": "node src/refresh-cli.js",
+    "db:schema": "psql \"$DATABASE_URL\" -f db/001_schema.sql",
+    "db:seed-services": "psql \"$DATABASE_URL\" -f db/002_seed_services.sql",
+    "db:seed-pricing": "psql \"$DATABASE_URL\" -f db/003_seed_national_pricing.sql",
+    "db:seed-locations": "psql \"$DATABASE_URL\" -f db/004_seed_locations.sql",
+    "db:setup": "npm run db:schema && npm run db:seed-services && npm run db:seed-pricing && npm run db:seed-locations"
+  },
+  "dependencies": {
+    "pg": "^8.12.0",
+    "fastify": "^4.29.1"
+  }
+}
