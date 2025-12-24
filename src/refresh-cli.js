@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // src/refresh-cli.js
+import "dotenv/config";
 import { runRefresh } from "./refresh.js";
 import { pool } from "./db.js";
 

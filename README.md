@@ -10,6 +10,7 @@ Fastify REST API serving pricing estimates based on BEA Regional Price Parities 
   - Bureau of Economic Analysis (BEA) - Regional Price Parities
   - Bureau of Labor Statistics (BLS) - Consumer Price Index
 - **Runtime**: Node.js 18+
+- **Documentation**: Swagger UI at `/docs`
 
 ## 🚀 Quick Start
 
@@ -23,10 +24,15 @@ export DATABASE_URL='postgresql://...'
 export BEA_API_KEY='...'
 export CPI_SERIES_ID='CUUR0000SA0'
 export ADMIN_API_KEY='dev-admin-key-12345'
+export BEA_SARPP_LINECODE='1'  # Optional: cache to avoid API calls
 export PORT='8080'
+
+# Setup database
+npm run db:setup
 
 npm start
 # API runs at http://localhost:8080
+# Swagger UI: http://localhost:8080/docs
 ```
 
 ### Watch Mode
@@ -41,18 +47,22 @@ npm run dev
 ```
 temp-services-api/
 ├── src/
-│   ├── index.js       # Fastify server with 5 endpoints
+│   ├── index.js       # Fastify server with 5 endpoints + Swagger
 │   ├── bea.js         # BEA RPP data fetcher
 │   ├── bls.js         # BLS CPI data fetcher
 │   ├── db.js          # PostgreSQL connection pool
-│   ├── refresh.js     # Monthly data refresh orchestrator
+│   ├── refresh.js     # Monthly data refresh orchestrator (transactional)
 │   └── refresh-cli.js # CLI for manual refresh
 ├── db/                # SQL migration files
-│   ├── 001_schema.sql
-│   ├── 002_seed_services.sql
-│   ├── 003_seed_national_pricing.sql
-│   ├── 004_seed_locations.sql
-│   └── 005_add_more_states.sql
+│   ├── 001_schema.sql              # Core schema + recompute function
+│   ├── 002_seed_services.sql       # 15 temp services
+│   ├── 003_seed_national_pricing.sql # Baseline US prices
+│   ├── 004_seed_locations.sql      # Initial 7 states
+│   └── 005_add_more_states.sql     # Additional 8 states
+├── webjobs/
+│   └── refresh/
+│       ├── run.sh              # WebJob runner script
+│       └── settings.job        # Schedule (monthly, singleton)
 └── package.json
 ```
 
@@ -63,41 +73,104 @@ temp-services-api/
 #### `GET /health`
 Health check
 ```json
-{ "status": "ok" }
+{ "ok": true }
 ```
 
 #### `GET /api/services`
-List all 15 services
+List all services with keys, names, and units
 ```json
 [
   {
     "key": "junk-removal",
     "name": "Junk Removal",
-    "slug_cost": "junk-removal-cost"
+    "unit": "per load"
   },
-  ...
+  {
+    "key": "plumber",
+    "name": "Plumber",
+    "unit": "per hour"
+  }
 ]
 ```
 
 #### `GET /api/locations`
-List all 15 states with RPP data
+List all active locations with RPP indices
 ```json
 [
   {
     "slug": "ca",
-    "name": "California",
-    "rpp": 112.6,
-    "geofips": "STATE"
-  },
-  ...
+    "type": "state",
+    "state_code": "CA",
+    "state_name": "California",
+    "city_name": null,
+    "rpp_index": 112.60,
+    "rpp_year": 2024
+  }
 ]
 ```
 
 #### `GET /api/estimate?service=junk-removal&location=ca`
-Get pricing estimate for a service in a state
+Get pricing estimate for a service in a location
 ```json
 {
-  "service": "junk-removal",
+  "service_key": "junk-removal",
+  "service_name": "Junk Removal",
+  "unit": "per load",
+  "location_slug": "ca",
+  "type": "state",
+  "state_code": "CA",
+  "state_name": "California",
+  "city_name": null,
+  "low": 168.90,
+  "typical": 337.80,
+  "high": 675.60,
+  "inputs": {
+    "national_low": 150.00,
+    "national_typical": 300.00,
+    "national_high": 600.00,
+    "cpi_baseline": 307.789,
+    "cpi_current": 307.789,
+    "cpi_ratio": 1.0,
+    "rpp_index": 112.60,
+    "adjustment_factor": 1.126
+  },
+  "computed_at": "2024-12-20T10:30:00Z"
+}
+```
+
+**Validation**: Returns 404 if service or location not found, 400 if parameters missing.
+
+### Admin Endpoints
+
+#### `POST /admin/refresh`
+Refresh all pricing data (requires `x-admin-key` header)
+
+**Headers**: 
+```
+x-admin-key: your-admin-key-here
+```
+
+**Response**:
+```json
+{
+  "ok": true,
+  "message": "Pricing data refreshed successfully",
+  "stats": {
+    "cpi": {
+      "year": 2024,
+      "period": "M11",
+      "value": 307.789
+    },
+    "rpp": {
+      "year": 2024,
+      "stateCount": 51
+    },
+    "updatedStates": 15,
+    "totalEstimates": 225,
+    "executionTimeMs": 3421
+  }
+}
+```
   "location": "ca",
   "estimate_low": 200,
   "estimate_high": 800,
@@ -130,24 +203,29 @@ x-admin-key: YOUR_ADMIN_API_KEY
 
 ### Tables
 
+After running `npm run db:setup`:
+
 - **services** (15 records) - Service definitions
-- **locations** (15 records) - States with RPP indices
-- **national_pricing** (15 records) - Angi baseline pricing
-- **macro_factors** (1 record) - Latest CPI data
-- **location_pricing** (225 records) - Computed estimates
+- **locations** (15 records) - States with RPP indices (7 initial + 8 additional)
+- **national_pricing** (15 records) - Internal baseline pricing ranges
+- **macro_factors** (grows monthly) - CPI time series data
+- **location_pricing** (225 records) - Computed estimates (15 services × 15 states)
+
+**Note**: `db:setup` runs all migrations including 005_add_more_states.sql to ensure all 15 states are seeded.
 
 ### Pricing Formula
 
 ```
-state_price = national_baseline × (RPP/100) × (CPI_latest/CPI_baseline)
+adjusted_price = national_baseline × (RPP_index/100) × (CPI_current/CPI_baseline)
 ```
 
 Example:
-- National junk removal: $150-$600
+- National junk removal: $300 (typical)
 - California RPP: 112.6
-- CPI baseline: 304.127 (Jan 2024)
-- CPI latest: 324.122 (Nov 2025)
-- **California estimate**: $180-$720
+- CPI ratio: 1.0 (current month)
+- **California estimate**: $300 × 1.126 × 1.0 = $338
+
+**Pricing Methodology**: Estimates are based on CPI and RPP adjustments applied to internal baseline ranges. Not affiliated with or based on quotes from third-party providers.
 
 ## ⚙️ Environment Variables
 
@@ -155,11 +233,20 @@ Example:
 # Required
 DATABASE_URL=postgresql://user:pass@host/db?sslmode=require
 BEA_API_KEY=your-bea-api-key
-CPI_SERIES_ID=CUUR0000SA0
 ADMIN_API_KEY=your-secret-admin-key
+
+# Recommended
+CPI_SERIES_ID=CUUR0000SA0                    # BLS CPI series (US All Urban)
+CPI_BASELINE_YEAR=2024                       # Stable baseline year (never change after setting)
+CPI_BASELINE_PERIOD=M01                      # Baseline period (M01 = January)
+BEA_SARPP_LINECODE=1                         # Cache for "All items RPP" (speeds up refresh)
 
 # Optional
 PORT=8080
+NODE_ENV=production                          # Controls Swagger (disabled in prod)
+ENABLE_SWAGGER=true                          # Force enable Swagger (overrides NODE_ENV)
+ENABLE_CORS=true                             # Enable CORS for browser calls (SSR doesn't need this)
+CORS_ORIGIN=https://your-frontend.com        # Restrict CORS origin (default: *)
 ```
 
 ### Get API Keys
@@ -167,6 +254,14 @@ PORT=8080
 - **BEA API Key**: Register at https://apps.bea.gov/api/signup/
 - **BLS Data**: Public API, no key needed
 - **Database**: Neon Postgres at https://neon.tech
+
+### Production Configuration Notes
+
+**CPI Baseline Stability**: Set `CPI_BASELINE_YEAR` and `CPI_BASELINE_PERIOD` once and never change. This ensures pricing calculations remain consistent across database reseeds.
+
+**Swagger in Production**: Disabled by default when `NODE_ENV=production`. Set `ENABLE_SWAGGER=true` to force enable (not recommended for public APIs).
+
+**CORS**: Only needed if your frontend makes direct browser calls to the API. Server-side rendering (SSR) with Next.js doesn't need CORS.
 
 ## 🔄 Data Refresh Schedule
 
@@ -192,6 +287,52 @@ curl -X POST https://temp-services-api.azurewebsites.net/admin/refresh \
 - Headers: `x-admin-key`
 
 ## 🚢 Deployment to Azure App Service
+
+### Production Readiness Fixes (December 2024)
+
+All critical production issues have been addressed:
+
+✅ **1. Database Migrations Complete**
+- All SQL files (001-005) now in source control
+- Schema includes `recompute_location_pricing()` function
+- Services, locations, and baseline pricing seeded
+
+✅ **2. WebJob Singleton Mode**
+- `is_singleton: true` prevents duplicate runs when scaled out
+- Schedule set to 1st of month: `"0 15 3 1 * *"`
+- Requires Always On enabled in App Service
+
+✅ **3. Transactional Refresh**
+- Full BEGIN/COMMIT/ROLLBACK wrapper
+- Prevents partial updates on failure
+- Client pooling with proper release
+
+✅ **4. Stable CPI Baseline**
+- Baseline set to earliest CPI record (not latest)
+- Survives database reseeds
+- Prevents ratio drift
+
+✅ **5. Enhanced Admin Stats**
+- Returns CPI year/period/value
+- Returns RPP year and state count
+- Returns updated states count
+- Returns total estimates count
+- Returns execution time in milliseconds
+
+✅ **6. Graceful Shutdown**
+- SIGTERM/SIGINT handlers
+- Closes Fastify server cleanly
+- Ends PostgreSQL pool properly
+
+✅ **7. Input Validation**
+- Validates service exists (404 if not found)
+- Validates location exists and is active
+- Proper HTTP status codes (400/404 instead of generic errors)
+
+✅ **8. BEA LineCode Caching**
+- Supports `BEA_SARPP_LINECODE` env var
+- Avoids redundant API discovery calls
+- Falls back to dynamic discovery if not set
 
 ### Create App Service
 
@@ -220,19 +361,56 @@ az webapp config appsettings set \
   --settings \
     DATABASE_URL='postgresql://...' \
     BEA_API_KEY='...' \
+    BEA_SARPP_LINECODE='1' \
     CPI_SERIES_ID='CUUR0000SA0' \
     ADMIN_API_KEY='...' \
     PORT='8080'
+
+# Enable Always On for WebJobs
+az webapp config set \
+  --name temp-services-api \
+  --resource-group temp-services-rg \
+  --always-on true
 ```
 
 ### Deploy
 
 ```bash
+# Zip deployment
+zip -r deploy.zip . -x "node_modules/*" ".git/*"
+
 az webapp deploy \
   --name temp-services-api \
   --resource-group temp-services-rg \
-  --src-path . \
+  --src-path deploy.zip \
   --type zip
+```
+
+### Setup WebJob (Scheduled Monthly Refresh)
+
+The WebJob configuration is already in `webjobs/refresh/`:
+
+```json
+{
+  "schedule": "0 15 3 1 * *",
+  "is_singleton": true
+}
+```
+
+**Cron format**: `sec min hour day month day-of-week`
+- Runs: 1st of every month at 03:15:00 UTC
+- `is_singleton` ensures only one instance runs across scale-out scenarios
+
+Deploy WebJob:
+```bash
+cd webjobs/refresh
+zip refresh.zip run.sh settings.job
+az webapp deployment source config-zip \
+  --name temp-services-api \
+  --resource-group temp-services-rg \
+  --src refresh.zip \
+  --webJob refresh \
+  --webJobType scheduled
 ```
 
 ### Or Use GitHub Actions
