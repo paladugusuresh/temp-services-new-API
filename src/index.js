@@ -31,7 +31,7 @@ if (enableSwagger) {
     },
     servers: [
       {
-        url: "https://temp-services-c3b6dtdzhag3ogbw.australiacentral-01.azurewebsites.net",
+        url: "https://temp-services-c3b6drdzhag3gxbw.australiacentral-01.azurewebsites.net",
         description: "Production server"
       },
       {
