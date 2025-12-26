@@ -1,0 +1,499 @@
+openapi: 3.0.3
+info:
+  title: Temp Services API
+  description: |
+    API for temporary service pricing estimates across US locations.
+    
+    Provides real-time pricing estimates for 23 different home services across all 51 US states,
+    adjusted for regional price variations and inflation.
+    
+    **Features:**
+    - 23 normalized services (handyman, plumbing, HVAC, etc.)
+    - 51 US locations (all states + DC)
+    - 1,173 unique location/service pricing combinations
+    - Regional Price Parity (RPP) adjustments
+    - CPI-based inflation adjustments
+  version: 1.0.0
+  contact:
+    email: support@temp-services.com
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://temp-services-api.azurewebsites.net
+    description: Production server
+  - url: http://localhost:8080
+    description: Local development server
+
+tags:
+  - name: health
+    description: Health check endpoints
+  - name: services
+    description: Service information endpoints
+  - name: locations
+    description: Location information endpoints
+  - name: estimates
+    description: Pricing estimate endpoints
+  - name: admin
+    description: Admin endpoints (requires authentication)
+
+paths:
+  /health:
+    get:
+      tags:
+        - health
+      summary: Health check
+      description: Returns the health status of the API
+      operationId: getHealth
+      responses:
+        '200':
+          description: API is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+
+  /api/services:
+    get:
+      tags:
+        - services
+      summary: List all services
+      description: |
+        Returns a list of all available temporary services.
+        
+        All services have normalized units:
+        - hour: Hourly services
+        - job: One-time jobs
+        - visit: Per-visit services
+        - repair: Repair services
+        - sq_ft: Per square foot
+        - day, week, room, linear_ft: Other units
+      operationId: getServices
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Service'
+              example:
+                - key: plumbing
+                  name: Plumbing
+                  unit: hour
+                - key: junk-removal
+                  name: Junk Removal
+                  unit: job
+                - key: house-cleaning
+                  name: House Cleaning
+                  unit: hour
+
+  /api/locations:
+    get:
+      tags:
+        - locations
+      summary: List all locations
+      description: |
+        Returns a list of all active US locations (states and DC).
+        
+        Each location includes:
+        - Regional Price Parity (RPP) index
+        - RPP data year
+        - State information
+      operationId: getLocations
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Location'
+              example:
+                - slug: ca
+                  type: state
+                  state_code: CA
+                  state_name: California
+                  city_name: null
+                  rpp_index: 112.581
+                  rpp_year: 2023
+                - slug: ny
+                  type: state
+                  state_code: NY
+                  state_name: New York
+                  city_name: null
+                  rpp_index: 107.626
+                  rpp_year: 2023
+
+  /api/estimate:
+    get:
+      tags:
+        - estimates
+      summary: Get pricing estimate
+      description: |
+        Returns a pricing estimate for a specific service at a specific location.
+        
+        Estimates include:
+        - Low, typical, and high price ranges
+        - Regional adjustments (RPP)
+        - Inflation adjustments (CPI)
+        - Calculation metadata
+      operationId: getEstimate
+      parameters:
+        - name: service
+          in: query
+          required: true
+          description: Service key (e.g., 'plumbing', 'junk-removal', 'house-cleaning')
+          schema:
+            type: string
+            enum:
+              - appliance-repair
+              - carpentry
+              - carpet-cleaning
+              - dumpster-rental
+              - electrician
+              - garage-door-repair
+              - gutter-cleaning
+              - handyman
+              - house-cleaning
+              - hvac
+              - junk-removal
+              - landscaping
+              - lawn-mowing
+              - leaf-removal
+              - moving-help
+              - painting
+              - pest-control
+              - pet-sitting
+              - plumbing
+              - pressure-washing
+              - roofing
+              - snow-removal
+              - yard-cleanup
+          example: plumbing
+        - name: location
+          in: query
+          required: true
+          description: Location slug (state code, e.g., 'ca', 'ny', 'tx')
+          schema:
+            type: string
+            pattern: '^[a-z]{2}$'
+          example: ca
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Estimate'
+        '400':
+          description: Missing required parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: service and location query params are required
+        '404':
+          description: Service or location not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                serviceNotFound:
+                  value:
+                    error: Service 'invalid-service' not found
+                locationNotFound:
+                  value:
+                    error: Location 'xx' not found or inactive
+                estimateNotFound:
+                  value:
+                    error: No estimate found. Run refresh job first.
+
+  /admin/refresh:
+    post:
+      tags:
+        - admin
+      summary: Refresh pricing data
+      description: |
+        Triggers a full refresh of pricing data for all services and locations.
+        
+        This operation:
+        1. Fetches latest CPI data from BLS
+        2. Updates RPP data from BEA
+        3. Recomputes all 1,173 location pricing estimates
+        
+        **Requires admin authentication**
+      operationId: refreshPricing
+      security:
+        - AdminApiKey: []
+      responses:
+        '200':
+          description: Refresh completed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RefreshResponse'
+        '401':
+          description: Unauthorized - invalid or missing API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Unauthorized
+        '500':
+          description: Refresh failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Missing BEA_API_KEY env var
+
+components:
+  securitySchemes:
+    AdminApiKey:
+      type: apiKey
+      in: header
+      name: x-admin-key
+      description: Admin API key for authentication
+
+  schemas:
+    Service:
+      type: object
+      required:
+        - key
+        - name
+        - unit
+      properties:
+        key:
+          type: string
+          description: Unique service identifier (slug)
+          example: plumbing
+        name:
+          type: string
+          description: Display name of the service
+          example: Plumbing
+        unit:
+          type: string
+          description: Unit of measurement for pricing
+          enum:
+            - hour
+            - job
+            - visit
+            - repair
+            - sq_ft
+            - day
+            - week
+            - room
+            - linear_ft
+          example: hour
+
+    Location:
+      type: object
+      required:
+        - slug
+        - type
+        - state_code
+        - state_name
+        - rpp_index
+        - rpp_year
+      properties:
+        slug:
+          type: string
+          description: Location slug (state code)
+          pattern: '^[a-z]{2}$'
+          example: ca
+        type:
+          type: string
+          description: Location type
+          enum:
+            - state
+            - city
+          example: state
+        state_code:
+          type: string
+          description: Two-letter state code
+          example: CA
+        state_name:
+          type: string
+          description: Full state name
+          example: California
+        city_name:
+          type: string
+          nullable: true
+          description: City name (null for state-level locations)
+          example: null
+        rpp_index:
+          type: number
+          format: float
+          description: Regional Price Parity index (100 = national average)
+          example: 112.581
+        rpp_year:
+          type: integer
+          description: Year of RPP data
+          example: 2023
+
+    Estimate:
+      type: object
+      required:
+        - service_key
+        - service_name
+        - unit
+        - location_slug
+        - type
+        - state_code
+        - state_name
+        - low
+        - typical
+        - high
+        - inputs
+        - computed_at
+      properties:
+        service_key:
+          type: string
+          description: Service identifier
+          example: plumbing
+        service_name:
+          type: string
+          description: Service display name
+          example: Plumbing
+        unit:
+          type: string
+          description: Unit of measurement
+          example: hour
+        location_slug:
+          type: string
+          description: Location identifier
+          example: ca
+        type:
+          type: string
+          description: Location type
+          example: state
+        state_code:
+          type: string
+          description: State code
+          example: CA
+        state_name:
+          type: string
+          description: State name
+          example: California
+        city_name:
+          type: string
+          nullable: true
+          description: City name (if applicable)
+          example: null
+        low:
+          type: number
+          format: float
+          description: Low-end price estimate
+          example: 56.31
+        typical:
+          type: number
+          format: float
+          description: Typical/average price estimate
+          example: 84.46
+        high:
+          type: number
+          format: float
+          description: High-end price estimate
+          example: 140.77
+        inputs:
+          type: object
+          description: Calculation metadata
+          properties:
+            rpp_year:
+              type: integer
+              description: RPP data year used
+              example: 2023
+            rpp_index:
+              type: number
+              description: RPP index applied
+              example: 112.581
+            cpi_latest:
+              type: number
+              description: Latest CPI value
+              example: 324.122
+            cpi_series:
+              type: string
+              description: CPI series ID
+              example: CUUR0000SA0
+            cpi_baseline:
+              type: number
+              description: Baseline CPI value
+              example: 324.122
+        computed_at:
+          type: string
+          format: date-time
+          description: Timestamp when estimate was computed
+          example: '2025-12-22T22:53:27.764Z'
+
+    RefreshResponse:
+      type: object
+      required:
+        - ok
+        - message
+        - stats
+      properties:
+        ok:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: Pricing data refreshed successfully
+        stats:
+          type: object
+          properties:
+            cpi:
+              type: object
+              nullable: true
+              properties:
+                year:
+                  type: integer
+                  example: 2025
+                period:
+                  type: string
+                  example: M11
+                value:
+                  type: number
+                  example: 324.122
+            rpp:
+              type: object
+              nullable: true
+              properties:
+                year:
+                  type: integer
+                  example: 2023
+                stateCount:
+                  type: integer
+                  example: 51
+            updatedStates:
+              type: integer
+              description: Number of states updated with RPP data
+              example: 51
+            totalEstimates:
+              type: integer
+              description: Total pricing estimates computed
+              example: 1173
+            executionTimeMs:
+              type: integer
+              description: Refresh execution time in milliseconds
+              example: 4812
+
+    Error:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          description: Error message
+          example: Service not found
