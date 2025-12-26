@@ -8,6 +8,16 @@ import { runRefresh } from "./refresh.js";
 
 const app = Fastify({ logger: true });
 
+// CORS (must be registered before Swagger for proper operation)
+if (process.env.ENABLE_CORS === 'true') {
+  const fastifyCors = (await import('@fastify/cors')).default;
+  await app.register(fastifyCors, {
+    origin: process.env.CORS_ORIGIN || '*',
+    credentials: true
+  });
+  app.log.info(`CORS enabled for origin: ${process.env.CORS_ORIGIN || '*'}`);
+}
+
 // Register Swagger (disabled in production unless explicitly enabled)
 const enableSwagger = process.env.ENABLE_SWAGGER === 'true' || process.env.NODE_ENV !== 'production';
 
@@ -52,16 +62,6 @@ if (enableSwagger) {
   app.log.info('Swagger UI enabled at /docs');
 } else {
   app.log.info('Swagger UI disabled (set ENABLE_SWAGGER=true to enable)');
-}
-
-// CORS (only needed if browser calls API directly - disable for SSR-only)
-if (process.env.ENABLE_CORS === 'true') {
-  const fastifyCors = (await import('@fastify/cors')).default;
-  await app.register(fastifyCors, {
-    origin: process.env.CORS_ORIGIN || '*',
-    credentials: true
-  });
-  app.log.info(`CORS enabled for origin: ${process.env.CORS_ORIGIN || '*'}`);
 }
 
 app.get("/health", {
